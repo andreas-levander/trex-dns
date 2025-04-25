@@ -1,0 +1,8 @@
+{
+    "python.analysis.extraPaths": [
+        "./src",
+        "./trex_client/interactive",
+        "./trex_client/external_libs/scapy-2.4.3/scapy",
+        "./trex_client/external_libs/scapy-2.4.3"
+    ]
+}
