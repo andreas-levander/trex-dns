@@ -24,7 +24,7 @@ class DNS64PerfTest:
         dns = DNS(rd=1, qd=DNSQR(qname="0000.dns64perf.test", qtype="AAAA"))
         base_pkt = l2 / l3 / l4/dns
         # Add instructions to modify the DNS query name dynamically
-        vm.var(name="b", min_value="0.0.0.0", max_value="0.0.1.255", size=4, op="inc")
+        vm.var(name="b", min_value="10.0.0.0", max_value="10.0.1.255", size=4, op="inc")
         #vm.var(name="c", min_value=0, max_value=255, size=1, op="inc")
         #vm.var(name="d", min_value=0, max_value=255, size=1, op="inc")
 
@@ -32,7 +32,7 @@ class DNS64PerfTest:
         vm.write(
             fv_name="b",
             pkt_offset= len(base_pkt) - 24,
-            byte_order= "big"
+            byte_order= "little"
         )
 
         # Fix checksum for IP and UDP layers
@@ -73,5 +73,5 @@ class DNS64PerfTest:
         c.disconnect()
 
 if __name__ == "__main__":
-    test = DNS64PerfTest(duration=1, rate_pps=50)
+    test = DNS64PerfTest(duration=1, rate_pps=10)
     test.run()
