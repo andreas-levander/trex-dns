@@ -1,4 +1,4 @@
-from scapy.all import DNS, DNSQR, IP, UDP, Ether
+from scapy.all import DNS, DNSQR, IP, UDP, Ether, ARP
 from trex.stl.api import *
 import math
 import argparse
@@ -6,26 +6,29 @@ import datetime
 import configparser
 
 class DNS64PerfTest:
-    def __init__(self, duration=60, rate_pps=1000, ip_dst="", ip_src=""):
+    def __init__(self, duration=60, rate_pps=1000, ip_dst="", ip_src="", mac_dst="", mac_src=""):
+        self.mac_src = mac_src
+        self.mac_dst = mac_dst
         self.duration = duration
         self.rate_pps = rate_pps
         self.ip_dst = ip_dst
         self.ip_src = ip_src
 
-
+ 
+        
     def create_stream(self):
         #print(f"IP src: {self.ip_src}, IP dst: {self.ip_dst}")
         # Use VM instructions to generate unique packets
         vm = STLVM()
         # Create the packet template
-        l2 = Ether()
+        l2 = Ether(dst=self.mac_dst, src=self.mac_src)
         l3 = IP(dst=self.ip_dst, src=self.ip_src)
         
         l4 = UDP(dport=53, sport=1024)
         dns = DNS(rd=0, qd=DNSQR(qname="0000.dns64perf.test", qtype="AAAA"))
         base_pkt = l2/ l3 / l4 / dns
         # Add instructions to modify the DNS query name dynamically
-        vm.var(name="b", min_value="0.0.0.0", max_value="4.0.0.0", size=4, op="inc")
+        vm.var(name="b", min_value="0.0.0.0", max_value="0.1.0.0", size=4, op="inc")
         vm.var(name="c", min_value=1024, max_value=10000, size=2, op="inc")
         #vm.var(name="d", min_value=0, max_value=255, size=1, op="inc")
 
@@ -53,22 +56,28 @@ class DNS64PerfTest:
             flow_stats=STLFlowStats(pg_id=1)
         )
 
+
+
     def run(self):
         c = STLClient()
         c.connect()
         c.reset(ports=[0])
 
-        c.add_streams(self.create_stream(), ports=[0])
+        #port1 = c.ports[0]
+        #print(json.dumps(port1.get_layer_cfg(), indent=4))
+        #print(json.dumps(port1.info, indent=4))
+        #c.set_l3_mode(port=[0], src_ipv4=self.ip_src, dst_ipv4=self.ip_dst)
 
-        c.clear_stats()
+        c.add_streams(self.create_stream(), ports=[0])
         c.start(ports=[0], duration=self.duration)
-        c.wait_on_traffic(ports=[0])
+        c.wait_on_traffic(ports=[0],rx_delay_ms=1000)
 
         stats = c.get_stats(ports=[0])
         #print(stats)
         sent = stats[0]['opackets']
         received = stats[0]['ipackets']  # RX port
 
+        
         print(f"Sent packets: {sent}")
         print(f"Received packets: {received}")
 
@@ -80,7 +89,13 @@ class DNS64PerfTest:
         c.disconnect()
         return (sent, received)
 
-def binary_searchQPS(low, high, duration, accuracy, ip_src, ip_dst):
+def binary_searchQPS(low, high, config):
+    duration = config['duration']
+    accuracy = config['accuracy']
+    ip_src = config['ip_src']
+    ip_dst = config['ip_dst']
+    mac_src = config['mac_src']
+    mac_dst = config['mac_dst']
     print(f"Minimum QPS: {low}, Maximum QPS: {high}, Duration: {duration} seconds, Accuracy: {accuracy}")
 
     while low < high:
@@ -88,7 +103,7 @@ def binary_searchQPS(low, high, duration, accuracy, ip_src, ip_dst):
         if high - low < accuracy:
             break
         print(f"Starting test QPS: {mid:,}, Requests: {mid * duration:,}")
-        test = DNS64PerfTest(duration=duration, rate_pps=mid, ip_dst=ip_dst, ip_src=ip_src)
+        test = DNS64PerfTest(duration=duration, rate_pps=mid, ip_dst=ip_dst, ip_src=ip_src, mac_dst=mac_dst, mac_src=mac_src)
         
         q, a = test.run()
         print(f"QPS: {mid:,},  Queries: {q:,}, Answers: {a:,}\n")
@@ -113,31 +128,67 @@ def get_args():
 
     return parser.parse_args().file
 
-def main():
+def create_arp_stream(config):
+    pkt = Ether(dst="ff:ff:ff:ff:ff:ff", src=config['mac_src']) / ARP(op=1, hwsrc=config['mac_src'], psrc=config['ip_src'], pdst=config['ip_dst'])
+    #print(f"ARP packet: {pkt.show(dump=True)}")
+
+    return STLStream(
+        packet=STLPktBuilder(pkt=pkt),
+        mode=STLTXCont(pps=1),)
+
+
+
+def send_arp(config):
+    c = STLClient()
+    c.connect()
+    c.reset(ports=[0])
+
+
+    # send ARP
+    print("Sending ARP Stream")
+    arp_stream = create_arp_stream(config)
+    c.add_streams(arp_stream, ports=[0])
+    c.start(ports=[0], duration=1)
+    c.wait_on_traffic(ports=[0], rx_delay_ms=1000)
+    
+        
+    c.disconnect()
+
+
+def get_config():
     cnfg_file = get_args()
     config = configparser.ConfigParser()
     files = config.read(cnfg_file)
     if not files:
         raise Exception(f"Could not read config file {cnfg_file}")
 
-    min_qps = config.getint('DEFAULT', 'min_qps')
-    max_qps = config.getint('DEFAULT', 'max_qps')
-    duration = config.getint('DEFAULT', 'duration')
-    accuracy = config.getint('DEFAULT', 'accuracy')
-    runs = config.getint('DEFAULT', 'runs')
-    ip_src = config.get('DEFAULT', 'ip_src')
-    ip_dst = config.get('DEFAULT', 'ip_dst')
+    return {
+        'min_qps': config.getint('DEFAULT', 'min_qps'),
+        'max_qps': config.getint('DEFAULT', 'max_qps'),
+        'duration': config.getint('DEFAULT', 'duration'),
+        'accuracy': config.getint('DEFAULT', 'accuracy'),
+        'ip_src': config.get('DEFAULT', 'ip_src'),
+        'ip_dst': config.get('DEFAULT', 'ip_dst'),
+        'mac_src': config.get('DEFAULT', 'mac_src'),
+        'mac_dst': config.get('DEFAULT', 'mac_dst'),
+        'runs': config.getint('DEFAULT', 'runs')    
+    }
 
 
+def main():
+    config = get_config()
     print("Starting DNS performance test...")
     before = datetime.datetime.now()
+    runs = config['runs']
+
+    #send_arp(config)
 
     for run in range(1, runs + 1):
         rt = datetime.datetime.now()
         print("\n********************************")
         print(f"Starting run {run}")
         log_target = f"runs.csv"
-        res = binary_searchQPS(min_qps, max_qps, duration, accuracy, ip_src, ip_dst)
+        res = binary_searchQPS(config['min_qps'], config['max_qps'], config)
         write_csv(log_target, {'run': run, 'qps': res})
         print(f"Run {run} done in {datetime.datetime.now() - rt}")
     
@@ -146,6 +197,6 @@ def main():
     
 
 if __name__ == "__main__":
-    #test = DNS64PerfTest(rate_pps=5, duration=1, ip_dst="192.168.0.196", ip_src="192.168.0.60")
+    #test = DNS64PerfTest(rate_pps=5, duration=1, ip_dst="192.168.0.195", ip_src="192.168.0.60")
     #test.run()
     main()
