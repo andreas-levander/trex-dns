@@ -4,6 +4,11 @@ import math
 import argparse
 import datetime
 import configparser
+import signal
+import sys
+
+# Global variable to hold the STLClient instance
+client: STLClient = None
 
 class DNS64PerfTest:
     def __init__(self, duration=60, rate_pps=1000, ip_dst="", ip_src="", mac_dst="", mac_src=""):
@@ -28,7 +33,7 @@ class DNS64PerfTest:
         dns = DNS(rd=0, qd=DNSQR(qname="0000.dns64perf.test", qtype="AAAA"))
         base_pkt = l2/ l3 / l4 / dns
         # Add instructions to modify the DNS query name dynamically
-        vm.var(name="b", min_value="0.0.0.0", max_value="0.1.0.0", size=4, op="inc")
+        vm.var(name="b", min_value="10.0.0.0", max_value="10.0.255.255", size=4, op="inc")
         vm.var(name="c", min_value=1024, max_value=10000, size=2, op="inc")
         #vm.var(name="d", min_value=0, max_value=255, size=1, op="inc")
 
@@ -59,8 +64,10 @@ class DNS64PerfTest:
 
 
     def run(self):
+        global client
         c = STLClient()
         c.connect()
+        client = c
         c.reset(ports=[0])
 
         #port1 = c.ports[0]
@@ -68,16 +75,17 @@ class DNS64PerfTest:
         #print(json.dumps(port1.info, indent=4))
         #c.set_l3_mode(port=[0], src_ipv4=self.ip_src, dst_ipv4=self.ip_dst)
 
+        c.clear_stats(ports=[0])
         c.add_streams(self.create_stream(), ports=[0])
         c.start(ports=[0], duration=self.duration)
         c.wait_on_traffic(ports=[0],rx_delay_ms=1000)
 
         stats = c.get_stats(ports=[0])
-        #print(stats)
+        print(stats)
+        
         sent = stats[0]['opackets']
         received = stats[0]['ipackets']  # RX port
 
-        
         print(f"Sent packets: {sent}")
         print(f"Received packets: {received}")
 
@@ -175,8 +183,21 @@ def get_config():
     }
 
 
+
+def signal_handler(sig, frame):
+    global client
+    print('\nCtrl+C detected. Exiting gracefully...')
+    if client:
+        try:
+            client.stop(ports=[0])
+            client.disconnect()
+        except Exception as e:
+            print(f"Error during disconnection: {e}")
+    sys.exit(0)
+
 def main():
     config = get_config()
+    signal.signal(signal.SIGINT, signal_handler)
     print("Starting DNS performance test...")
     before = datetime.datetime.now()
     runs = config['runs']
